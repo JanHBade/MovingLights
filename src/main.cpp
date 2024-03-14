@@ -10,7 +10,7 @@
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
 #include <WS2812FX.h>
-#include <PubSubClient.h>
+#include <MQTT.h>
 #include <ArduinoJson.h>
 
 #define LEDPIN 13
@@ -37,9 +37,10 @@ Values values;
 
 #define SENSOR_PIN 15
 Ticker tStopLight;
+bool Running = false;
 
 WiFiClient espClient;
-PubSubClient MqttClient(espClient);
+MQTTClient MqttClient;
 
 ESP8266WebServer httpServer(80);
 ESP8266HTTPUpdateServer httpUpdater;
@@ -54,7 +55,7 @@ ESP8266HTTPUpdateServer httpUpdater;
 #define MQTT_TOPIC_JSON MQTT_PREFIX HOSTNAME
 
 char hw_buf[JSON_BUFFER_SIZE];
-int UpdateCnt = 0;
+int volatile UpdateCnt = 0;
 
 void reconnectMqtt()
 {
@@ -64,7 +65,7 @@ void reconnectMqtt()
     IPAddress ip;
     Serial.println(WiFi.hostByName(MQTT_BROKER, ip));
     Serial.println(ip);
-    MqttClient.setServer(ip, 1883);
+    MqttClient.begin(ip, espClient);
     
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect
@@ -72,12 +73,11 @@ void reconnectMqtt()
     {
       Serial.println("connected");
       // Once connected, publish an announcement...
-      MqttClient.publish(MQTT_TOPIC_HW, hw_buf);
+      MqttClient.publish(MQTT_TOPIC_HW, hw_buf, true, 0);
     }
     else
     {
-      Serial.print("failed, rc=");
-      Serial.print(MqttClient.state());
+      Serial.print("failed");
     }
   }
 }
@@ -86,12 +86,11 @@ void reconnectWifi()
 {
   if(!WiFi.isConnected())
   {
-    WiFi.persistent(false);	//verhindert Flash Schreiben
-    WiFi.setPhyMode(WIFI_PHY_MODE_11N); //braucht am wenigsten Strom
-    WiFi.hostname(HOSTNAME);	//damit die Fritz.Box und so weiter den namen anzeigen
-
     //WiFiManager, Local intialization. Once its business is done, there is no need to keep it around
     WiFiManager wm;
+    wm.setHostname(HOSTNAME);
+    wm.setDarkMode(true);
+    wm.setScanDispPerc(true); // display percentages instead of graphs for RSSI
 
     // reset settings - wipe stored credentials for testing
     // these are stored by the esp library
@@ -272,6 +271,17 @@ void fAutoFarbe()
 void fStopLight()
 {
   ws2812fx.stop();
+  Running = false;
+}
+
+void IRAM_ATTR change()
+{
+    if (!ws2812fx.isRunning())
+    {
+      ws2812fx.start();      
+    } 
+    tStopLight.once(15,fStopLight);
+    Running = true;
 }
 
 void setup()
@@ -309,6 +319,11 @@ void setup()
   tAutoFarbe.attach(tickerStart, fAutoFarbe);
 
   pinMode(SENSOR_PIN,INPUT);
+  attachInterrupt(SENSOR_PIN, &change, CHANGE);
+
+  reconnectWifi();
+
+  reconnectMqtt();
 
   httpUpdater.setup(&httpServer);  
 	httpServer.begin();
@@ -325,18 +340,13 @@ void loop()
   values.Temperatur = 0.8 * values.Temperatur + 0.2 * bme.readTemperature();
   values.Feuchtigkeit = 0.8 * values.Feuchtigkeit + 0.2 * bme.readHumidity();
   values.Luftdruck = 0.8 * values.Luftdruck + 0.2 * bme.readPressure()/100.0;
-  values.TimerActive = tStopLight.active();
+  values.TimerActive = Running;
   values.WlanSignal = 0.8 * values.WlanSignal + 0.2 *  WiFi.RSSI();
 
   //steigende Flanke
   if(digitalRead(SENSOR_PIN) && !values.Sensor)
   {
-    //Serial.println(millis());
-    if (!ws2812fx.isRunning())
-    {
-      ws2812fx.start();      
-    } 
-    tStopLight.once(15,fStopLight);   
+    //Serial.println(millis());   
     values.Sensor = true;
     UpdateCnt = 0;
   }
@@ -348,11 +358,11 @@ void loop()
 
   if (0 == UpdateCnt)
   {
-    UpdateCnt = 900;
+    UpdateCnt = 100;
     StaticJsonDocument<JSON_BUFFER_SIZE> doc;
     doc["Temperatur"] = values.Temperatur;
     doc["Feuchte"] = values.Feuchtigkeit;
-    doc["Luftdruck"] = values.Luftdruck;
+    doc["Druck"] = values.Luftdruck;
     doc["Sensor"] = values.Sensor;
     doc["Timer"] = values.TimerActive;
     doc["WlanSignal"] = values.WlanSignal;
@@ -367,8 +377,10 @@ void loop()
 
     MqttClient.publish(MQTT_TOPIC_JSON, buf);
   }
+  else
+    UpdateCnt--;
 
-  for (int i = 0; i < 900; i++)
+  for (int i = 0; i < 100; i++)
   {
     ws2812fx.service();    
     httpServer.handleClient();
