@@ -13,6 +13,8 @@
 #include <MQTT.h>
 #include <ArduinoJson.h>
 
+#include "gitrevision.h"
+
 #define LEDPIN 13
 #define NUMPIXELS 16
 WS2812FX ws2812fx = WS2812FX(NUMPIXELS, LEDPIN, NEO_GRB + NEO_KHZ800);
@@ -28,14 +30,15 @@ struct Values
 	float Feuchtigkeit = 0;
 	float Luftdruck = 0;
 	float Temperatur = 0;
-  bool Sensor;
+  uint16_t Sensor;
   bool TimerActive;
 	int32_t WlanSignal = 0;
 	uint16_t Zaehler = 0;
 };
 Values values;
 
-#define SENSOR_PIN 15
+#define SENSOR_PIN 12
+#define SENSOR_PIN2 14
 Ticker tStopLight;
 bool Running = false;
 
@@ -123,6 +126,7 @@ void reconnectWifi()
       hw_doc["MAC"] = WiFi.macAddress();	
       hw_doc["IP"] = WiFi.localIP().toString();
       hw_doc["Gateway"] = WiFi.gatewayIP().toString();
+      hw_doc["git"] = gitRevShort;
       serializeJson(hw_doc, hw_buf, JSON_BUFFER_SIZE);
     }
   }
@@ -316,17 +320,28 @@ void setup()
       Serial.print("        ID of 0x61 represents a BME 680.\n");      
   }
 
+  values.Temperatur = bme.readTemperature();
+  values.Feuchtigkeit = bme.readHumidity();
+  values.Luftdruck = bme.readPressure()/100.0;
+  
+
   tAutoFarbe.attach(tickerStart, fAutoFarbe);
 
   pinMode(SENSOR_PIN,INPUT);
-  attachInterrupt(SENSOR_PIN, &change, CHANGE);
+  pinMode(SENSOR_PIN2,INPUT);
+  attachInterrupt(SENSOR_PIN, &change, CHANGE);  
+  attachInterrupt(SENSOR_PIN2, &change, CHANGE);
 
   reconnectWifi();
+
+  values.WlanSignal = WiFi.RSSI();
 
   reconnectMqtt();
 
   httpUpdater.setup(&httpServer);  
 	httpServer.begin();
+
+  Serial.println(gitRevision);
 
   Serial.println("Startup fertig");
 }
@@ -340,19 +355,29 @@ void loop()
   values.Temperatur = 0.8 * values.Temperatur + 0.2 * bme.readTemperature();
   values.Feuchtigkeit = 0.8 * values.Feuchtigkeit + 0.2 * bme.readHumidity();
   values.Luftdruck = 0.8 * values.Luftdruck + 0.2 * bme.readPressure()/100.0;
-  values.TimerActive = Running;
   values.WlanSignal = 0.8 * values.WlanSignal + 0.2 *  WiFi.RSSI();
 
-  //steigende Flanke
-  if(digitalRead(SENSOR_PIN) && !values.Sensor)
+  //start Timer
+  if(Running && ! values.TimerActive)
   {
-    //Serial.println(millis());   
-    values.Sensor = true;
+    values.TimerActive = true;
     UpdateCnt = 0;
   }
-  else if (!digitalRead(SENSOR_PIN) && values.Sensor) //fallend
+  else if (!Running && values.TimerActive)  //Stop Timer
   {
-    values.Sensor = false;
+    values.TimerActive = false;
+    UpdateCnt = 0;
+  }
+
+  int i=0;
+  if(digitalRead(SENSOR_PIN))
+    i++;
+  if(digitalRead(SENSOR_PIN2))
+    i++;
+
+  if (i != values.Sensor)
+  {
+    values.Sensor = i;
     UpdateCnt = 0;
   }
 
