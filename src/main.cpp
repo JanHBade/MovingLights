@@ -30,8 +30,8 @@ struct Values
 	float Feuchtigkeit = 0;
 	float Luftdruck = 0;
 	float Temperatur = 0;
-  uint16_t Sensor;
-  bool TimerActive;
+  uint8_t Sensor;
+  uint8_t TimerActive;
 	int32_t WlanSignal = 0;
 	uint16_t Zaehler = 0;
 };
